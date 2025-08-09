@@ -1,171 +1,140 @@
-# utils_r1.py
+# model.py
+from flask import Blueprint, request, jsonify
 import numpy as np
-import pandas as pd
-from scipy.fft import fft, fftfreq
-from scipy.signal import iirnotch, filtfilt, coherence, get_window
-from scipy.interpolate import interp1d
+from utils import (
+    read_json_payload,
+    waveform_preprocessing,
+    convert_B_to_H,
+    compute_spectral_analysis,
+    calculate_resistivity,
+    calculate_skin_depth,
+    resitivity_depth_interpolation,
+    jsonify_nan,
+)
 
-MU0 = 4*np.pi*1e-7  # H/m
+model_r1_bp = Blueprint("model_r1", __name__)
 
-def safe_get(data, *keys, default=None):
-    for k in keys:
-        if isinstance(data, dict) and k in data:
-            data = data[k]
-        else:
-            return default
-    return data
+DEFAULTS = {
+    "electrodes_distance_in_meters": 2.0,
+    "buffer_in_seconds": 0.0382,
+    "mur": 1.0,
+    "demean": True,
+    "taper": True,
+    "taper_window": "hann",
+    "taper_alpha": 0.1,
+    "notch": True,
+    "notch_freq": 50.0,
+    "notch_q": 30.0,
+    "max_time_msec": 200,
+    "coh_threshold": 0.5,
+    "nperseg": 256,
+    "noverlap": None,
+}
 
-def read_json_payload(payload, buffer_in_seconds=0.0):
-    """Lee JSON flexible (data|samples) con geophone, seismoelectric y magnetometer."""
-    data = payload.get("data", payload)
+@model_r1_bp.route("/api/model-r1", methods=["POST"])
+def model_r1():
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        cfg = DEFAULTS.copy()
+        cfg.update(payload.get("config", {}) or {})
 
-    geophone = safe_get(data, "geophone", "data") or safe_get(data, "samples", "geophone", "data") or {}
-    se_data  = safe_get(data, "seismoelectric", "data") or safe_get(data, "samples", "seismoelectric", "data") or {}
-    mag_data = safe_get(data, "magnetometer", "data") or safe_get(data, "samples", "magnetometer", "data") or {}
+        # Lectura
+        df, meta = read_json_payload(payload, buffer_in_seconds=cfg["buffer_in_seconds"])
+        fs = float(meta["sampling"])
+        timevec = df["time"].to_numpy()
 
-    if safe_get(data, "samples", "magnetometer", "sampleRate") is not None:
-        samplerate = safe_get(data, "samples", "magnetometer", "sampleRate")
-    else:
-        samplerate = safe_get(data, "magnetometer", "samplerate")
+        # Señales
+        V1 = df["V1"].to_numpy()
+        V2 = df["V2"].to_numpy()
+        Bx = df["Bx"].to_numpy()
+        By = df["By"].to_numpy()
+        Bz = df["Bz"].to_numpy()
 
-    # señales (a SI)
-    gx = np.array(geophone.get("x", []), float)
-    gy = np.array(geophone.get("y", []), float)
-    gz = np.array(geophone.get("z", []), float)
+        # Preprocesamiento
+        pre = dict(
+            fs=fs,
+            demean=bool(cfg["demean"]),
+            notch=bool(cfg["notch"]),
+            notch_freq=float(cfg["notch_freq"]),
+            notch_q=float(cfg["notch_q"]),
+            taper=bool(cfg["taper"]),
+            taper_window=str(cfg["taper_window"]),
+            taper_alpha=float(cfg["taper_alpha"]),
+        )
+        V1 = waveform_preprocessing(V1, **pre)
+        V2 = waveform_preprocessing(V2, **pre)
+        Bx = waveform_preprocessing(Bx, **pre)
+        By = waveform_preprocessing(By, **pre)
+        Bz = waveform_preprocessing(Bz, **pre)
 
-    v1 = np.array(se_data.get("v1", []), float) * 1e-3  # V
-    v2 = np.array(se_data.get("v2", []), float) * 1e-3
+        # Campos
+        d = float(cfg["electrodes_distance_in_meters"])
+        mur = float(cfg["mur"])
+        E1 = V1 / d
+        E2 = V2 / d
+        Hx = convert_B_to_H(Bx, mur)
+        Hy = convert_B_to_H(By, mur)
+        Hz = convert_B_to_H(Bz, mur)
 
-    bx = np.array(mag_data.get("x", []), float) * 1e-9  # T
-    by = np.array(mag_data.get("y", []), float) * 1e-9
-    bz = np.array(mag_data.get("z", []), float) * 1e-9
+        # Ventana temporal
+        mask = timevec <= (float(cfg["max_time_msec"]) / 1000.0)
+        time_ms = (timevec[mask] * 1000.0).astype(float)
+        E1 = E1[mask]; E2 = E2[mask]
+        Hx = Hx[mask]; Hy = Hy[mask]; Hz = Hz[mask]
 
-    fs = samplerate if samplerate else 3333
-    dt = 1.0 / fs
-    n = min(*(len(a) for a in [gx, gy, gz, v1, v2, bx, by, bz] if len(a)))
-    if n == 0:
-        n = 0
-    time_s = np.arange(0, n*dt, dt)
+        def analyze(E, H):
+            E_amp, H_amp, _, _, coh, f = compute_spectral_analysis(E, H, fs, nperseg=int(cfg["nperseg"]), noverlap=cfg["noverlap"])
+            rho = calculate_resistivity(E_amp, H_amp, mur)
+            if coh.size and f.size and rho.size:
+                valid = coh > float(cfg["coh_threshold"])
+                fv = f[valid]; rhov = rho[valid]
+                delta, rhoc = calculate_skin_depth(rhov, fv)
+            else:
+                delta, rhoc = np.array([]), np.array([])
+            return {"f": f, "coh": coh, "rho": rho, "delta": delta, "rho_cut": rhoc}
 
-    gx, gy, gz, v1, v2, bx, by, bz = [a[:n] for a in (gx, gy, gz, v1, v2, bx, by, bz)]
+        e1hx = analyze(E1, Hx)
+        e1hy = analyze(E1, Hy)
+        e1hz = analyze(E1, Hz)
+        e2hx = analyze(E2, Hx)
+        e2hy = analyze(E2, Hy)
+        e2hz = analyze(E2, Hz)
 
-    df = pd.DataFrame(
-        np.array([time_s, gx, gy, gz, v1, v2, bx, by, bz]).T,
-        columns=["time","Gx","Gy","Gz","V1","V2","Bx","By","Bz"]
-    )
+        def interp(dlt, rho):
+            if dlt.size and rho.size:
+                d_new, r_new = resitivity_depth_interpolation(dlt, rho)
+                return d_new, r_new
+            return np.array([]), np.array([])
 
-    if buffer_in_seconds and n:
-        df = df[df["time"] >= buffer_in_seconds].copy()
-        df["time"] = df["time"] - df["time"].iloc[0]
-        df.reset_index(drop=True, inplace=True)
+        d_e1hx, r_e1hx = interp(e1hx["delta"], e1hx["rho_cut"])
+        d_e1hy, r_e1hy = interp(e1hy["delta"], e1hy["rho_cut"])
+        d_e1hz, r_e1hz = interp(e1hz["delta"], e1hz["rho_cut"])
+        d_e2hx, r_e2hx = interp(e2hx["delta"], e2hx["rho_cut"])
+        d_e2hy, r_e2hy = interp(e2hy["delta"], e2hy["rho_cut"])
+        d_e2hz, r_e2hz = interp(e2hz["delta"], e2hz["rho_cut"])
 
-    meta = {
-        "projectName": data.get("projectName", "undefined"),
-        "timezone": data.get("timezone", "undefined"),
-        "timestamp": data.get("timestamp", "undefined"),
-        "geolocation": data.get("geolocation", []),
-        "deviceId": data.get("deviceId", "undefined"),
-        "temperature": data.get("temperature", None),
-        "humidity": data.get("humidity", None),
-        "sampling": fs
-    }
-    return df, meta
+        out = {
+            "electric_field": {"E1": E1.tolist(), "E2": E2.tolist(), "time_ms": time_ms.tolist()},
+            "magnetic_field": {"Hx": Hx.tolist(), "Hy": Hy.tolist(), "Hz": Hz.tolist(), "time_ms": time_ms.tolist()},
+            "resistivity_e1hx": {"rho_xx_1": e1hx["rho_cut"].tolist(), "delta_xx_1": e1hx["delta"].tolist(), "rho_new": r_e1hx.tolist(), "depth_new": d_e1hx.tolist()},
+            "resistivity_e1hy": {"rho_xy_1": e1hy["rho_cut"].tolist(), "delta_xy_1": e1hy["delta"].tolist(), "rho_new": r_e1hy.tolist(), "depth_new": d_e1hy.tolist()},
+            "resistivity_e1hz": {"rho_xz_1": e1hz["rho_cut"].tolist(), "delta_xz_1": e1hz["delta"].tolist(), "rho_new": r_e1hz.tolist(), "depth_new": d_e1hz.tolist()},
+            "resistivity_e2hx": {"rho_xx_2": e2hx["rho_cut"].tolist(), "delta_xx_2": e2hx["delta"].tolist(), "rho_new": r_e2hx.tolist(), "depth_new": d_e2hx.tolist()},
+            "resistivity_e2hy": {"rho_xy_2": e2hy["rho_cut"].tolist(), "delta_xy_2": e2hy["delta"].tolist(), "rho_new": r_e2hy.tolist(), "depth_new": d_e2hy.tolist()},
+            "resistivity_e2hz": {"rho_xz_2": e2hz["rho_cut"].tolist(), "delta_xz_2": e2hz["delta"].tolist(), "rho_new": r_e2hz.tolist(), "depth_new": d_e2hz.tolist()},
+            "spectra": {
+                "e1hx": {"f": e1hx["f"].tolist(), "coh": e1hx["coh"].tolist()},
+                "e1hy": {"f": e1hy["f"].tolist(), "coh": e1hy["coh"].tolist()},
+                "e1hz": {"f": e1hz["f"].tolist(), "coh": e1hz["coh"].tolist()},
+                "e2hx": {"f": e2hx["f"].tolist(), "coh": e2hx["coh"].tolist()},
+                "e2hy": {"f": e2hy["f"].tolist(), "coh": e2hy["coh"].tolist()},
+                "e2hz": {"f": e2hz["f"].tolist(), "coh": e2hz["coh"].tolist()},
+            },
+            "meta": meta,
+            "config_used": cfg,
+        }
 
-def apply_taper(x, window="hann", alpha=0.1):
-    n = len(x)
-    if n == 0:
-        return x
-    if window == "tukey":
-        w = get_window(("tukey", alpha), n, fftbins=False)
-    else:
-        w = get_window(window, n, fftbins=False)
-    return x * w
+        return jsonify(status="ok", data=jsonify_nan(out)), 200
 
-def waveform_preprocessing(x, fs, *, demean=True, notch=False, notch_freq=50.0, notch_q=30.0, taper=False, taper_window="hann", taper_alpha=0.1):
-    y = np.asarray(x, float)
-    if y.size == 0:
-        return y
-    if demean:
-        y = y - np.nanmean(y)
-    if notch:
-        # SciPy permite versión con 'fs=' (frecuencia en Hz)
-        b, a = iirnotch(notch_freq, Q=notch_q, fs=fs)
-        if y.size > max(len(a), len(b)) * 3:
-            y = filtfilt(b, a, y)
-    if taper:
-        y = apply_taper(y, window=taper_window, alpha=taper_alpha)
-    return y
-
-def convert_B_to_H(B, mur=1.0, mu0=MU0):
-    return B / (mu0*mur)
-
-def compute_spectral_analysis(E, H, fs, nperseg=256, noverlap=None):
-    dt = 1.0 / fs
-    n = len(E)
-    if n == 0:
-        return np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([])
-
-    E_fft = fft(E); H_fft = fft(H)
-    freqs = fftfreq(n, dt)
-    pos = freqs > 0
-    f = freqs[pos]
-    E_amp = (2.0 / n) * np.abs(E_fft[pos])
-    H_amp = (2.0 / n) * np.abs(H_fft[pos])
-    E_pha = np.angle(E_fft[pos], deg=True)
-    H_pha = np.angle(H_fft[pos], deg=True)
-
-    # coherencia robusta para series cortas
-    if noverlap is None:
-        noverlap = nperseg // 2
-    nperseg_eff = max(16, min(nperseg, n//2 if n < nperseg else nperseg))
-    noverlap_eff = max(8, min(noverlap, nperseg_eff//2))
-
-    f_coh, coh = coherence(E, H, fs=fs, window="hann", nperseg=nperseg_eff, noverlap=noverlap_eff)
-    if f.size and f_coh.size:
-        coh = np.interp(f, f_coh, coh)
-    else:
-        coh = np.array([])
-
-    return E_amp, H_amp, E_pha, H_pha, coh, f
-
-def calculate_resistivity(E_amp, H_amp, mur=1.0, mu0=MU0):
-    if E_amp.size == 0 or H_amp.size == 0:
-        return np.array([])
-    H_amp = np.where(H_amp == 0, 1e-12, H_amp)
-    Z = E_amp / H_amp
-    return (Z**2) / (mu0*mur)
-
-def calculate_skin_depth(rho, f_vec, mu0=MU0, zmin=0.0, zmax=300.0):
-    if rho.size == 0 or f_vec.size == 0:
-        return np.array([]), np.array([])
-    w = 2*np.pi * f_vec
-    w = np.where(w == 0, 1e-12, w)
-    delta = np.sqrt((2.0 * rho) / (w * mu0))
-    idx = np.argsort(delta)
-    delta = delta[idx]; rho = rho[idx]
-    mask = (delta >= zmin) & (delta <= zmax)
-    return delta[mask], rho[mask]
-
-def resitivity_depth_interpolation(x, y, num_points=10, kind="nearest", space="log"):
-    x = np.asarray(x, float); y = np.asarray(y, float)
-    if x.size == 0: return np.array([]), np.array([])
-    idx = np.argsort(x); x_sorted = x[idx]; y_sorted = y[idx]
-    x_min, x_max = x_sorted[0], x_sorted[-1]
-    if x_min <= 0: x_min = np.nextafter(0, 1)
-    x_new = np.logspace(np.log10(x_min), np.log10(x_max), num=num_points) if space=="log" else np.linspace(x_min, x_max, num=num_points)
-    f = interp1d(x_sorted, y_sorted, kind=kind, fill_value="extrapolate")
-    y_new = f(x_new)
-    return x_new, y_new
-
-def jsonify_nan(obj):
-    if isinstance(obj, dict):
-        return {k: jsonify_nan(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [jsonify_nan(v) for v in obj]
-    if isinstance(obj, np.ndarray):
-        return jsonify_nan(obj.tolist())
-    if isinstance(obj, (np.floating, float)):
-        return None if not np.isfinite(obj) else float(obj)
-    if isinstance(obj, (np.integer, int)):
-        return int(obj)
-    return obj
+    except Exception as e:
+        return jsonify(status="error", error=str(e)), 400
