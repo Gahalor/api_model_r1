@@ -1,7 +1,7 @@
 # model.py
-from flask import Blueprint, request, jsonify
+from flask import Flask, Blueprint, request, jsonify
 import numpy as np
-from utils import (
+from utils_r1 import (
     read_json_payload,
     waveform_preprocessing,
     convert_B_to_H,
@@ -12,7 +12,8 @@ from utils import (
     jsonify_nan,
 )
 
-model_r1_bp = Blueprint("model_r1", __name__)
+app = Flask(__name__)
+bp = Blueprint("model_r1", __name__)
 
 DEFAULTS = {
     "electrodes_distance_in_meters": 2.0,
@@ -31,7 +32,7 @@ DEFAULTS = {
     "noverlap": None,
 }
 
-@model_r1_bp.route("/api/model-r1", methods=["POST"])
+@bp.route("/api/model-r1", methods=["POST"])
 def model_r1():
     try:
         payload = request.get_json(force=True, silent=False) or {}
@@ -83,7 +84,9 @@ def model_r1():
         Hx = Hx[mask]; Hy = Hy[mask]; Hz = Hz[mask]
 
         def analyze(E, H):
-            E_amp, H_amp, _, _, coh, f = compute_spectral_analysis(E, H, fs, nperseg=int(cfg["nperseg"]), noverlap=cfg["noverlap"])
+            E_amp, H_amp, _, _, coh, f = compute_spectral_analysis(
+                E, H, fs, nperseg=int(cfg["nperseg"]), noverlap=cfg["noverlap"]
+            )
             rho = calculate_resistivity(E_amp, H_amp, mur)
             if coh.size and f.size and rho.size:
                 valid = coh > float(cfg["coh_threshold"])
@@ -138,3 +141,11 @@ def model_r1():
 
     except Exception as e:
         return jsonify(status="error", error=str(e)), 400
+
+# (opcional) healthcheck
+@bp.get("/health")
+def health():
+    return jsonify(ok=True), 200
+
+# registra el blueprint en la app principal
+app.register_blueprint(bp)

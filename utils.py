@@ -1,14 +1,14 @@
-# utils.py
+# utils_r1.py
 import numpy as np
 import pandas as pd
 from scipy.fft import fft, fftfreq
 from scipy.signal import iirnotch, filtfilt, coherence, get_window
 from scipy.interpolate import interp1d
-from typing import Tuple, Any, Dict
+from typing import Any
 
 MU0 = 4 * np.pi * 1e-7  # H/m
 
-def safe_get(data: Dict, *keys, default=None):
+def safe_get(data, *keys, default=None):
     for k in keys:
         if isinstance(data, dict) and k in data:
             data = data[k]
@@ -16,8 +16,7 @@ def safe_get(data: Dict, *keys, default=None):
             return default
     return data
 
-def read_json_payload(payload: Dict, buffer_in_seconds: float = 0.0):
-    """Lee JSON flexible (data|samples) con geophone, seismoelectric y magnetometer."""
+def read_json_payload(payload, buffer_in_seconds: float = 0.0):
     data = payload.get("data", payload)
 
     geophone = safe_get(data, "geophone", "data") or safe_get(data, "samples", "geophone", "data") or {}
@@ -29,7 +28,6 @@ def read_json_payload(payload: Dict, buffer_in_seconds: float = 0.0):
     else:
         samplerate = safe_get(data, "magnetometer", "samplerate")
 
-    # señales (a SI)
     gx = np.array(geophone.get("x", []), float)
     gy = np.array(geophone.get("y", []), float)
     gz = np.array(geophone.get("z", []), float)
