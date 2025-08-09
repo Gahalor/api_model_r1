@@ -1,7 +1,7 @@
 # model.py
 from flask import Flask, Blueprint, request, jsonify
 import numpy as np
-from utils_r1 import (
+from utils import (
     read_json_payload,
     waveform_preprocessing,
     convert_B_to_H,
@@ -13,7 +13,7 @@ from utils_r1 import (
 )
 
 app = Flask(__name__)
-bp = Blueprint("model_r1", __name__)
+bp = Blueprint("model", __name__)
 
 DEFAULTS = {
     "electrodes_distance_in_meters": 2.0,
@@ -32,8 +32,8 @@ DEFAULTS = {
     "noverlap": None,
 }
 
-@bp.route("/api/model-r1", methods=["POST"])
-def model_r1():
+@bp.route("/", methods=["POST"])
+def model():
     try:
         payload = request.get_json(force=True, silent=False) or {}
         cfg = DEFAULTS.copy()
