@@ -13,8 +13,8 @@ COPY . /app
 # Instala dependencias
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Expone el puerto 5300
-EXPOSE 5300
+# Expone el puerto 5410
+EXPOSE 5410
 
 # Lanza la aplicación Flask con Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:5300", "model:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5410", "model:app"]
