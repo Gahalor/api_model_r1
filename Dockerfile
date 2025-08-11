@@ -21,4 +21,4 @@ COPY . .
 EXPOSE 5410
 
 CMD gunicorn -w 2 -k gthread --threads 8 -t 180 \
-    --bind 0.0.0.0:${PORT:-5410} model:app
+    --bind 0.0.0.0:${PORT:-5420} model:app
