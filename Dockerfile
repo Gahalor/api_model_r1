@@ -1,24 +1,31 @@
+# Dockerfile
 FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    OMP_NUM_THREADS=1 \
-    OPENBLAS_NUM_THREADS=1 \
-    MKL_NUM_THREADS=1
-
+# Dependencias del sistema y Java para H2O MOJO
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
+    openjdk-11-jre-headless build-essential \
     && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+ENV PATH="$JAVA_HOME/bin:$PATH"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+# Instala requirements primero para aprovechar cache
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
+# Copia el resto
 COPY . .
 
-EXPOSE 5410
+# asegura que uploads exista
+RUN mkdir -p /app/uploads
 
-CMD gunicorn -w 2 -k gthread --threads 8 -t 180 \
-    --bind 0.0.0.0:${PORT:-5420} model:app
+# Puerto y comando
+ENV PORT=8080
+EXPOSE 8080
+
+# workers=2..4 según CPU/RAM
+CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:8080", "model:app", "--timeout", "120"]
