@@ -1,16 +1,14 @@
 # Dockerfile
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # Java para H2O MOJO + toolchain para SciPy
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openjdk-17-jre-headless \
     build-essential \
-    && rm -rf /var/lib/apt/lists/*
+    libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
 
-# Si prefieres paquete "genérico": default-jre-headless
-# RUN apt-get update && apt-get install -y --no-install-recommends default-jre-headless build-essential && rm -rf /var/lib/apt/lists/*
-
-# JAVA_HOME para JRE 17 en Debian
+# JAVA_HOME para JRE 17 en Debian (bookworm)
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ENV PATH="$JAVA_HOME/bin:$PATH"
 ENV PYTHONDONTWRITEBYTECODE=1
