@@ -1,12 +1,27 @@
 from flask import Flask, request, jsonify
+from functools import wraps
 import os
 import traceback
 from utils import process_json_data
 
-# ========= FLASK SETUP =============
 app = Flask(__name__)
 
+
+def require_internal_key(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        expected = os.environ.get("INTERNAL_API_KEY", "")
+        if not expected:
+            return jsonify({"status": "error", "message": "API no configurada."}), 500
+        provided = request.headers.get("X-Internal-Key", "")
+        if not provided or provided != expected:
+            return jsonify({"status": "error", "message": "No autorizado."}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
 @app.route('/', methods=['POST'])
+@require_internal_key
 def procesar():
     """
     Endpoint para procesar archivos JSON de datos sísmicos y devolver datos para gráficos.
